@@ -1,24 +1,2549 @@
-<!DOCTYPE html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Günlük Futbol Analiz</title><style>
-:root{--bg:#0f1115;--panel:#171a21;--border:#2a2e37;--text:#e7e9ee;--muted:#9aa1ad;--accent:#f2b705;--good:#3ddc84}
-*{box-sizing:border-box}
-body{margin:0;padding:24px 12px;background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-.wrap{max-width:1000px;margin:0 auto}
-h1{font-size:22px;margin:0 0 4px}
-.meta{color:var(--muted);font-size:13px;margin-bottom:18px}
-.nav a{color:var(--accent);text-decoration:none;font-size:14px}
-h2{font-size:14px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:26px 0 10px}
-.tbl{overflow-x:auto;border-radius:10px;background:var(--panel);border:1px solid var(--border)}
-table{width:100%;border-collapse:collapse;min-width:560px}
-th,td{padding:9px 11px;text-align:left;font-size:14px;border-bottom:1px solid var(--border)}
-th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;white-space:nowrap}
-tr:last-child td{border-bottom:none}
-.empty{color:var(--muted);padding:14px;background:var(--panel);border-radius:10px;font-size:14px;border:1px solid var(--border)}
-.val{color:var(--good);font-weight:700}
-.sig{color:var(--muted);font-size:12px}
-footer{color:var(--muted);font-size:12px;margin-top:30px}
-ul.days{list-style:none;padding:0;margin:0}
-ul.days li{margin:0 0 8px}
-ul.days a{display:block;padding:12px 14px;background:var(--panel);border:1px solid var(--border);border-radius:10px;color:var(--text);text-decoration:none}
-ul.days a:hover{border-color:var(--accent)}
-.latest a{border-color:var(--accent)}
-</style></head><body><div class='wrap'><div class='nav'><a href='../'>&larr; Zcode raporu</a></div><h1>Günlük Futbol Analiz</h1><div class='meta'>Bir gün seç</div><ul class='days'><li class='latest'><a href='2026-11-24.html'>2026-11-24 &middot; Salı &middot; en son</a></li></ul></div></body></html>
+<!DOCTYPE html>
+<html lang="tr" class="dark">
+<head>
+<script>
+(function () {
+  const realFetch = window.fetch.bind(window);
+  const MARKETS = {
+    ms_gol_ustu: "MS / Gol Üstü (Aşama A)", ilk_yari_1: "İlk Yarı 1",
+    over_2_5: "Toplam Gol 2.5 Üstü", btts: "Karşılıklı Gol (KG Var)"
+  };
+  const cache = {};
+  function loadJson(path) {
+    if (!cache[path]) {
+      cache[path] = realFetch(path, { cache: "no-cache" })
+        .then(r => (r.ok ? r.json() : null)).catch(() => null);
+    }
+    return cache[path];
+  }
+  const json = (obj, status) => new Response(JSON.stringify(obj), {
+    status: status || 200, headers: { "Content-Type": "application/json" } });
+  const byLeague = (arr, lg) => lg === "ALL" ? arr : arr.filter(x => String(x.league_id) === String(lg));
+
+  function summarize(entries) {
+    const total = entries.length;
+    const pending = entries.filter(e => e.result_status === "beklemede").length;
+    const won = entries.filter(e => e.result_status === "kazandi").length;
+    const lost = entries.filter(e => e.result_status === "kaybetti").length;
+    const resolved = won + lost;
+    const net = entries.reduce((s, e) => s + (e.return_units || 0), 0);
+    return { total, resolved, won, lost, pending,
+      hit_rate_pct: resolved ? Math.round(won / resolved * 1000) / 10 : null,
+      net_getiri: Math.round(net * 100) / 100,
+      roi_pct: resolved ? Math.round(net / resolved * 1000) / 10 : null };
+  }
+  function perf(d, date, lg) {
+    const markets = {};
+    let all = [];
+    for (const k of Object.keys(MARKETS)) {
+      const src = d && d.performance && d.performance.markets && d.performance.markets[k];
+      const entries = byLeague(src ? src.entries : [], lg);
+      markets[k] = { label: MARKETS[k], entries, summary: summarize(entries) };
+      all = all.concat(entries);
+    }
+    return { date, league_id: lg, fetch_info: { fetched: 0, with_halftime: 0, skipped: true, reason: "statik" },
+             markets, overall: summarize(all) };
+  }
+
+  window.fetch = async function (input, init) {
+    const url = typeof input === "string" ? input : input.url;
+    if (!url.startsWith("/api/")) return realFetch(input, init);
+    const u = new URL(url, location.origin);
+    const p = u.pathname, date = u.searchParams.get("date"), lg = u.searchParams.get("league_id") || "ALL";
+    const method = ((init && init.method) || "GET").toUpperCase();
+    if (method !== "GET") {
+      return json({ detail: "Bu web sürümü salt-okunur. Analiz her sabah otomatik çalışır; yeni analiz için GitHub Actions'tan Run workflow kullan." }, 403);
+    }
+    if (p === "/api/cumulative-performance" || p === "/api/backtest-summary") {
+      const g = await loadJson("data/global.json");
+      if (p === "/api/cumulative-performance") return json((g && g.cumulative) || ZERO_CUM());
+      return json((g && g.backtest) || { has_data: false });
+    }
+    if (p.endsWith("/status")) return json({ running: false, phase: null, last_status: null, last_message: null });
+    const d = date ? await loadJson("data/" + date + ".json") : null;
+    const list = (key) => byLeague((d && d[key]) || [], lg);
+    if (p === "/api/reports") { const a = list("reports"); return json({ date, league_id: lg, count: a.length, reports: a }); }
+    if (p === "/api/first-half-candidates") { const a = list("first_half"); return json({ date, league_id: lg, count: a.length, candidates: a }); }
+    if (p === "/api/over25-candidates") { const a = list("over25"); return json({ date, league_id: lg, count: a.length, candidates: a }); }
+    if (p === "/api/btts-candidates") { const a = list("btts"); return json({ date, league_id: lg, count: a.length, candidates: a }); }
+    if (p === "/api/prediction-performance") return json(perf(d, date, lg));
+    return json({ detail: "Bu uç noktası statik sürümde yok." }, 404);
+  };
+  function ZERO_CUM() { return { total: 0, resolved: 0, won: 0, lost: 0, pending: 0, hit_rate_pct: null, net_getiri: 0, roi_pct: null }; }
+})();
+</script>
+<style>
+  #analyzeBtn, #forceReanalyzeLabel, #runBacktestBtn, #runSweepBtn { display: none !important; }
+  #staticNote { margin: 10px 0 0; padding: 8px 12px; border-radius: 12px; font-size: 12px;
+    border: 1px solid #334155; background: rgba(30,41,59,.5); color: #94a3b8; }
+</style>
+
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <title>Günlük Futbol AI</title>
+
+  <!-- PWA: Manifest ve tema renkleri -->
+  <link rel="manifest" href="static/manifest.json" />
+  <meta name="theme-color" content="#020617" />
+  <meta name="background-color" content="#020617" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Futbol Analiz" />
+  <link rel="apple-touch-icon" href="static/icons/icon-192.png" />
+  <link rel="icon" href="static/icons/icon-192.png" />
+
+  <!-- Tailwind CSS (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    /* Yatay kaydırılabilir lig filtresi için scrollbar'ı gizle */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    .league-chip {
+      transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+    }
+    .league-chip-active {
+      background-color: rgb(79 70 229 / 1); /* indigo-600 */
+      color: white;
+      border-color: rgb(99 102 241 / 1); /* indigo-500 */
+    }
+
+    .tab-btn {
+      color: rgb(148 163 184 / 1); /* slate-400 */
+      background-color: transparent;
+    }
+    .tab-btn-active {
+      background-color: rgb(30 41 59 / 1); /* slate-800 */
+      color: rgb(248 250 252 / 1); /* slate-50 */
+    }
+
+    .perf-bar-track {
+      background-color: rgb(30 41 59 / 1); /* slate-800 */
+    }
+    .perf-bar-fill {
+      transition: width .4s ease;
+    }
+
+    @keyframes fade-in-up {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .card-enter { animation: fade-in-up .25s ease both; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 antialiased">
+
+  <!-- ================= HEADER ================= -->
+  <!-- İSTEK (2026-09): başlık, tarih seçici, lig filtresi VE sekmeler
+       önceden "sticky top-0" idi -- yani aşağı kaydırınca hiç kaybolmuyor,
+       ekranın büyük bölümünü kalıcı olarak işgal ediyordu. Artık normal
+       akışa alındı: sayfa kaydırıldığında bu bölüm de içerikle birlikte
+       yukarı kayar, sadece rapor/backtest listesi görünür kalır. -->
+  <header class="border-b border-slate-800/80 bg-slate-950/90">
+    <div class="mx-auto max-w-2xl px-4 pt-[max(env(safe-area-inset-top),1rem)] pb-3">
+      <div class="min-w-0">
+        <h1 class="text-lg font-bold leading-tight tracking-tight text-slate-50">⚽ Günlük Futbol AI</h1>
+        <p class="truncate text-xs text-slate-500">AI destekli form uyumsuzluğu &amp; value bet motoru</p>
+      </div>
+
+      <div class="mt-2 flex items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2">
+        <div class="min-w-0">
+          <p class="truncate text-[11px] font-semibold text-slate-400">📊 Genel Başarı Oranı</p>
+          <p id="cumulativeCount" class="truncate text-[10px] text-slate-600">yükleniyor…</p>
+          <p id="cumulativeGetiri" class="truncate text-[10px] font-semibold text-slate-600"></p>
+        </div>
+        <span id="cumulativeBadge" class="inline-flex shrink-0 items-center rounded-full border border-slate-700 bg-slate-800/50 px-3 py-1 text-sm font-extrabold text-slate-500">— %</span>
+      </div>
+
+      <div class="mt-3 flex items-center gap-2">
+        <input
+          id="datePicker"
+          type="date" min="2026-09-13" max="2026-11-24"
+          value="2026-11-24"
+          class="w-0 flex-1 min-w-0 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-200 outline-none focus:border-indigo-500"
+        />
+        <button
+          id="analyzeBtn"
+          class="flex shrink-0 items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-2 text-xs font-bold text-white shadow-lg shadow-indigo-950/50 transition active:scale-95 hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <span id="analyzeBtnIcon">⚡</span>
+          <span id="analyzeBtnLabel">Bugünü Analiz Et</span>
+        </button>
+      </div>
+
+      <!-- Faz 9: "Baştan Analiz Et" -- normalde aynı tarih tekrar analiz
+           edilince önbellek sayesinde YENİ eklenmeyen ligler/maçlar için
+           API'ye tekrar istek atılmaz. Bu kutu işaretliyse önbellek TAMAMEN
+           yok sayılır: seçili TÜM ligler ve maçlar için veri/oran YENİDEN
+           çekilir (bkz. /api/trigger-analysis'in force parametresi). -->
+      <label
+        id="forceReanalyzeLabel"
+        class="mt-2 flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-400"
+      >
+        <input
+          id="forceReanalyzeCheckbox"
+          type="checkbox"
+          class="h-3.5 w-3.5 rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-0 focus:ring-offset-0"
+        />
+        <span>🔄 Baştan Analiz Et <span class="text-slate-500">(zaten analiz edilmiş olsa bile veriyi/oranları yeniden çek)</span></span>
+      </label>
+
+      <!-- Analiz Edilecek Ligler: "Bugünü Analiz Et" tetiklendiğinde SADECE
+           işaretli ligler API'den çekilip analiz edilir (varsayılan: hepsi
+           seçili). Aşağıdaki "Lig Filtresi" ise bunun tam tersine, ZATEN
+           analiz edilmiş sonuçları görüntülerken filtreler -- ikisi farklı
+           amaçlara hizmet eder. -->
+      <div class="mt-3">
+        <button
+          type="button"
+          id="leagueSelectToggle"
+          class="flex w-full items-center justify-between rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300"
+        >
+          <span>🏆 Analiz Edilecek Ligler</span>
+          <span class="flex items-center gap-1.5 text-slate-500">
+            <span id="leagueSelectCount"></span>
+            <span id="leagueSelectChevron">▾</span>
+          </span>
+        </button>
+
+        <div id="leagueSelectPanel" class="hidden mt-1.5 rounded-xl border border-slate-800 bg-slate-900/60 p-2.5">
+          <div class="mb-2 flex gap-2">
+            <button
+              type="button"
+              id="leagueSelectAllBtn"
+              class="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-700"
+            >
+              Tümünü Seç
+            </button>
+            <button
+              type="button"
+              id="leagueSelectNoneBtn"
+              class="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-700"
+            >
+              Hiçbirini Seçme
+            </button>
+          </div>
+          <div id="leagueCheckboxList" class="max-h-64 space-y-0.5 overflow-y-auto pr-1"></div>
+        </div>
+      </div>
+
+      <!-- Lig Filtresi (görüntüleme -- zaten analiz edilmiş sonuçları filtreler) -->
+      <div class="no-scrollbar mt-3 flex gap-2 overflow-x-auto pb-1">
+        <button
+          type="button"
+          data-league-id="ALL"
+          class="league-chip league-chip-active shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-200"
+        >
+          Tümü
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="61"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Ligue 1
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="78"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Bundesliga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="39"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="140"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          La Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="94"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Primeira Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="203"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Süper Lig
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="204"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          TFF 1. Lig
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="253"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Major League Soccer
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="128"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga Profesional
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="17"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          AFC Champions League Elite
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="419"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premyer Liqa
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="344"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Primera División
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="71"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Brasileirão Serie A
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="72"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Brasileirão Serie B
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="172"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          First League (Efbet Lig)
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="173"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Second League (Victoria Liga)
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="119"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Superliga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="242"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga Pro
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="343"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          First League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="328"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Esiliiga A
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="244"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Veikkausliiga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="62"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Ligue 2
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="210"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          HNL
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="89"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Eerste Divisie
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="357"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier Division
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="141"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          La Liga 2
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="383"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Ligat Ha&#39;al
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="382"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga Leumit
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="113"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Allsvenskan
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="114"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Superettan
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="164"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Úrvalsdeild
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="98"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          J1 League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="99"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          J2 League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="479"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Canadian Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="239"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Primera A
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="240"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Primera B
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="664"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Superliga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="371"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          First League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="365"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Virsliga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="362"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          A Lyga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="393"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="262"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga MX
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="233"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="103"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Eliteserien
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="104"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          1. Division
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="473"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          2. Division - Group 1
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="474"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          2. Division - Group 2
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="304"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga Panameña de Fútbol
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="250"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Division Profesional - Apertura
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="252"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Division Profesional - Clausura
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="106"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Ekstraklasa
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="107"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          I Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="95"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga Portugal 2
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="283"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga I
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="284"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga II
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="235"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="236"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          First League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="368"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="286"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Super Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="287"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Prva Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="307"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Pro League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="333"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="334"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Persha Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="197"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Super League 1
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="494"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Super League 2
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="218"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Bundesliga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="219"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          2. Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="116"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Vysshaya Liga (Premier League)
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="117"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Pershaya Liga (1. Division)
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="80"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          3. Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="345"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Czech Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="346"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          FNL
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="169"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Super League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="170"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          League One
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="274"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Liga 1
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="110"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Cymru Premier (Premier League)
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="211"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          First NL
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="40"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Championship
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="41"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          League One
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="42"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          League Two
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="43"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          National League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="207"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Super League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="208"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Challenge League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="389"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premier League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="408"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Premiership
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="271"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          NB I
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="394"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Super Liga
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="205"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          2. Lig (Beyaz + Kırmızı Grup)
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="265"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Primera División
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="266"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Primera B (Ascenso)
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="144"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Jupiler Pro League
+        </button>
+        
+        <button
+          type="button"
+          data-league-id="145"
+          class="league-chip shrink-0 whitespace-nowrap rounded-full border border-slate-700 bg-slate-900 px-4 py-1.5 text-xs font-semibold text-slate-300"
+        >
+          Challenger Pro League
+        </button>
+        
+      </div>
+
+      <!-- Sekme (Tab) Geçişi: Günlük Raporlar <-> Backtest & Algoritma Başarısı -->
+      <div class="mt-3 grid grid-cols-2 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/60 p-1">
+        <button
+          type="button"
+          id="tabReportsBtn"
+          data-tab="reports"
+          class="tab-btn tab-btn-active rounded-lg px-3 py-1.5 text-xs font-bold transition"
+        >
+          📋 Günlük Raporlar
+        </button>
+        <button
+          type="button"
+          id="tabBacktestBtn"
+          data-tab="backtest"
+          class="tab-btn rounded-lg px-3 py-1.5 text-xs font-bold transition"
+        >
+          📈 Backtest &amp; Başarı
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ================= ANA İÇERİK ================= -->
+  <main class="mx-auto max-w-2xl px-4 py-4 pb-[calc(env(safe-area-inset-bottom)+2rem)]">
+    <!-- Sekme 1: Günlük Raporlar (varsayılan görünür) -->
+    <div id="reportsView">
+      <!-- Tahmin Sonuçları Özeti: seçilen tarih için geçmiş sonuç varsa görünür (bkz. fetchPredictionPerformance) -->
+      <div id="perfSummaryBox" class="hidden mb-3 flex items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
+        <div class="min-w-0">
+          <p class="text-[10px] font-bold uppercase tracking-wide text-slate-500">🎯 Bu Tarihin Sonuç İsabeti</p>
+          <p id="perfSummaryCount" class="mt-0.5 truncate text-[11px] text-slate-500"></p>
+          <p id="perfSummaryGetiri" class="mt-0.5 truncate text-[11px] font-semibold text-slate-500"></p>
+        </div>
+        <span id="perfSummaryBadge" class="inline-flex shrink-0 items-center rounded-full border border-slate-700 bg-slate-800/50 px-3 py-1.5 text-lg font-extrabold text-slate-500">— %</span>
+      </div>
+      <div id="staticNote">📱 Salt-okunur sürüm: analiz her sabah otomatik çalışır. Üstteki tarih kutusundan geçmiş günlere bakabilirsin.</div>
+<div id="reportsContainer" class="space-y-3"></div>
+
+      <!-- İlk Yarı 1 Adayları: Aşama A (MS/GOL_ÜSTÜ)'dan BAĞIMSIZ ayrı bir strateji.
+           Aynı maç hem yukarıdaki listede hem burada görünebilir. -->
+      <div class="mt-6">
+        <div class="mb-2 flex items-center gap-2">
+          <p class="text-xs font-bold uppercase tracking-wide text-slate-500">🕐 İlk Yarı 1 Adayları</p>
+          <span class="rounded-full border border-cyan-700/50 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-400">Ayrı strateji</span>
+        </div>
+        <div id="firstHalfContainer" class="space-y-3"></div>
+      </div>
+
+      <!-- Toplam Gol 2.5 Üstü Adayları: diğer stratejilerden BAĞIMSIZ üçüncü strateji. -->
+      <div class="mt-6">
+        <div class="mb-2 flex items-center gap-2">
+          <p class="text-xs font-bold uppercase tracking-wide text-slate-500">⚽ Toplam Gol 2.5 Üstü Adayları</p>
+          <span class="rounded-full border border-amber-700/50 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-400">Ayrı strateji</span>
+        </div>
+        <div id="over25Container" class="space-y-3"></div>
+      </div>
+
+      <!-- Karşılıklı Gol (KG Var) Adayları: diğer stratejilerden BAĞIMSIZ dördüncü strateji. -->
+      <div class="mt-6">
+        <div class="mb-2 flex items-center gap-2">
+          <p class="text-xs font-bold uppercase tracking-wide text-slate-500">🔁 Karşılıklı Gol (KG Var) Adayları</p>
+          <span class="rounded-full border border-emerald-700/50 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">Ayrı strateji</span>
+        </div>
+        <div id="bttsContainer" class="space-y-3"></div>
+      </div>
+    </div>
+
+    <!-- Sekme 2: Backtest & Algoritma Başarısı (varsayılan gizli) -->
+    <div id="backtestView" class="hidden space-y-4">
+
+      <!-- Yeni Backtest Çalıştırma Formu -->
+      <section class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+        <p class="mb-3 text-sm font-bold text-slate-200">🧪 Yeni Backtest Çalıştır</p>
+        <label class="mb-2.5 block text-xs text-slate-500">
+          Piyasa
+          <select id="btMarket" class="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-2 text-xs text-slate-200 outline-none focus:border-indigo-500">
+            <option value="ms_gol_ustu">MS / Gol Üstü (Aşama A) — Güven Skoru eşikli</option>
+            <option value="ht_1">İlk Yarı 1 (Ev Sahibi Önde) — sabit kural</option>
+            <option value="over_2_5">2.5 Üstü (Toplam Gol) — sabit kural</option>
+            <option value="btts">Karşılıklı Gol (KG Var) — sabit kural</option>
+          </select>
+        </label>
+        <div class="grid grid-cols-2 gap-2">
+          <label class="col-span-1 text-xs text-slate-500">
+            Başlangıç
+            <input id="btStartDate" type="date" class="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-2 text-xs text-slate-200 outline-none focus:border-indigo-500" />
+          </label>
+          <label class="col-span-1 text-xs text-slate-500">
+            Bitiş
+            <input id="btEndDate" type="date" class="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-2 text-xs text-slate-200 outline-none focus:border-indigo-500" />
+          </label>
+          <label id="btMinConfidenceLabel" class="col-span-1 text-xs text-slate-500">
+            Min. Güven Skoru
+            <input id="btMinConfidence" type="number" min="0" max="100" value="70" class="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-2 text-xs text-slate-200 outline-none focus:border-indigo-500" />
+          </label>
+          <p id="btMinConfidenceNote" class="hidden col-span-1 self-end rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-2 text-[10px] leading-snug text-slate-600">
+            Bu piyasada eşik yok — canlı pipeline'ın sabit kuralı test edilir.
+          </p>
+          <label class="col-span-1 text-xs text-slate-500">
+            Birim Bahis (Unit)
+            <input id="btUnitStake" type="number" min="0.1" step="0.1" value="1" class="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-2 text-xs text-slate-200 outline-none focus:border-indigo-500" />
+          </label>
+        </div>
+        <label class="mt-2.5 flex items-center gap-2 text-xs text-slate-400">
+          <input id="btSkipXg" type="checkbox" checked class="h-4 w-4 rounded border-slate-700 bg-slate-950 accent-indigo-600" />
+          xG verisini atla (kota dostu &amp; hızlı — önerilir)
+        </label>
+        <button
+          id="runBacktestBtn"
+          class="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg shadow-indigo-950/50 transition active:scale-95 hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <span id="runBacktestBtnIcon">▶️</span>
+          <span id="runBacktestBtnLabel">Backtest'i Çalıştır</span>
+        </button>
+
+        <!-- Çalışırken: canlı ilerleme (% tamamlandı + kaç maç kaldı) -->
+        <div id="backtestProgress" class="hidden mt-2.5">
+          <div class="flex items-center justify-between text-[11px] text-slate-500">
+            <span id="backtestProgressText">Taranıyor…</span>
+            <span id="backtestProgressPct" class="font-bold text-indigo-400">%0</span>
+          </div>
+          <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div id="backtestProgressBar" class="h-full rounded-full bg-indigo-500 transition-all duration-500" style="width:0%"></div>
+          </div>
+        </div>
+
+        <p class="mt-2 text-[11px] leading-relaxed text-slate-600">
+          Not: Bir tarih aralığı İLK kez çalıştırıldığında her maç için API isteği
+          yapılır ve birkaç dakika sürebilir. Aynı (veya üst üste binen) aralık
+          TEKRAR çalıştırıldığında, zaten önbelleklenmiş maçlar için hiç API
+          isteği yapılmaz -- sonuç saniyeler içinde gelir.
+        </p>
+      </section>
+
+      <!-- Eşik Taraması (Threshold Sweep) -->
+      <section class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+        <p class="mb-1 text-sm font-bold text-slate-200">🎯 Eşik Taraması (Threshold Sweep)</p>
+        <p class="mb-3 text-[11px] leading-relaxed text-slate-600">
+          Yukarıdaki tarih aralığı için TEK bir API taramasıyla birden çok Min. Güven Skoru
+          eşiğini aynı anda test eder ve her eşiğin sonucunu AYRI AYRI gösterir -- hangi eşiğin
+          en kârlı olduğunu bulmak için kullanışlıdır.
+        </p>
+        <label class="block text-xs text-slate-500">
+          Test Edilecek Eşikler (virgülle ayrılmış)
+          <input
+            id="sweepThresholds"
+            type="text"
+            value="50,55,60,65,70,75,80,85,90"
+            class="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-2 text-xs text-slate-200 outline-none focus:border-indigo-500"
+          />
+        </label>
+        <button
+          id="runSweepBtn"
+          class="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl bg-amber-600 px-3 py-2.5 text-xs font-bold text-white shadow-lg shadow-amber-950/50 transition active:scale-95 hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <span id="runSweepBtnIcon">🎯</span>
+          <span id="runSweepBtnLabel">Taramayı Başlat</span>
+        </button>
+
+        <!-- Çalışırken: canlı ilerleme (% tamamlandı + kaç maç kaldı) -->
+        <div id="sweepProgress" class="hidden mt-2.5">
+          <div class="flex items-center justify-between text-[11px] text-slate-500">
+            <span id="sweepProgressText">Taranıyor…</span>
+            <span id="sweepProgressPct" class="font-bold text-amber-400">%0</span>
+          </div>
+          <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div id="sweepProgressBar" class="h-full rounded-full bg-amber-500 transition-all duration-500" style="width:0%"></div>
+          </div>
+        </div>
+
+        <p class="mt-2 text-[11px] leading-relaxed text-slate-600">
+          Not: Yukarıdaki "Başlangıç/Bitiş" tarihi ve "Birim Bahis" / "xG verisini atla" ayarları
+          bu tarama için de kullanılır. Point-in-time veri kalıcı olarak önbelleğe
+          kaydedilir -- aynı aralık tekrar tarandığında (farklı eşiklerle de olsa)
+          hiç API isteği yapılmadan saniyeler içinde sonuç gelir.
+        </p>
+
+        <!-- Tarama Sonucu: Eşik Bazlı Kırılım -->
+        <div id="sweepResultsSection" class="hidden mt-4 space-y-3">
+          <div id="sweepBestCallout" class="hidden rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+            <p class="text-[10px] font-bold uppercase tracking-wide text-amber-500/90">🏆 En Kârlı Eşik</p>
+            <p id="sweepBestText" class="mt-1 text-sm font-bold text-amber-300"></p>
+          </div>
+          <div class="overflow-x-auto rounded-xl border border-slate-800">
+            <table class="w-full text-left text-[11px]">
+              <thead class="bg-slate-950/60 text-slate-500">
+                <tr>
+                  <th class="px-2.5 py-2 font-semibold">Eşik</th>
+                  <th class="px-2.5 py-2 font-semibold">Bahis</th>
+                  <th class="px-2.5 py-2 font-semibold">İsabet</th>
+                  <th class="px-2.5 py-2 font-semibold">Net K/Z</th>
+                  <th class="px-2.5 py-2 font-semibold">ROI</th>
+                  <th class="px-2.5 py-2 font-semibold">Kasa</th>
+                </tr>
+              </thead>
+              <tbody id="sweepResultsBody" class="divide-y divide-slate-800/80"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Backtest Sonucu Boş Durumu -->
+      <div id="backtestEmptyState" class="hidden flex-col items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/40 px-6 py-12 text-center">
+        <div class="mb-4 text-5xl">📊</div>
+        <p class="text-sm font-semibold text-slate-200">Henüz hiç backtest çalıştırılmadı.</p>
+        <p class="mt-2 text-xs text-slate-500">Yukarıdaki formla bir tarih aralığı seçip ilk backtest'inizi başlatın.</p>
+      </div>
+
+      <!-- Backtest Sonuç Özeti -->
+      <div id="backtestSummaryContent" class="hidden space-y-4">
+
+        <!-- İsabet Oranı Rozeti + Genel Metrikler -->
+        <section class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <div class="flex items-center justify-between">
+            <p id="btResultMarketLabel" class="text-xs font-bold uppercase tracking-wide text-slate-500">Algoritma İsabet Oranı</p>
+            <span id="btRangeLabel" class="text-[11px] text-slate-600"></span>
+          </div>
+          <div class="mt-2 flex items-center gap-3">
+            <span id="btHitRateBadge" class="inline-flex items-center rounded-full border px-3 py-1.5 text-lg font-extrabold"></span>
+            <span id="btBetCountLabel" class="text-xs text-slate-400"></span>
+          </div>
+
+          <div class="mt-4 grid grid-cols-3 gap-2 text-center">
+            <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-2.5">
+              <p class="text-[10px] font-bold uppercase tracking-wide text-slate-500">Net Kâr/Zarar</p>
+              <p id="btNetProfit" class="mt-1 text-sm font-extrabold"></p>
+            </div>
+            <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-2.5">
+              <p class="text-[10px] font-bold uppercase tracking-wide text-slate-500">ROI</p>
+              <p id="btRoi" class="mt-1 text-sm font-extrabold"></p>
+            </div>
+            <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-2.5">
+              <p class="text-[10px] font-bold uppercase tracking-wide text-slate-500">Kasa</p>
+              <p id="btBankroll" class="mt-1 text-sm font-extrabold text-slate-200"></p>
+            </div>
+          </div>
+        </section>
+
+        <!-- En Başarılı Bahis Türü Callout -->
+        <section id="btBestBetTypeCallout" class="hidden rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+          <p class="text-[10px] font-bold uppercase tracking-wide text-amber-500/90">🏆 En Başarılı Bahis Türü</p>
+          <p id="btBestBetTypeText" class="mt-1 text-sm font-bold text-amber-300"></p>
+        </section>
+
+        <!-- Lig Bazlı Performans Kırılımı -->
+        <section class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <p class="mb-3 text-xs font-bold uppercase tracking-wide text-slate-500">Lig Bazlı Performans</p>
+          <div id="btLeagueBreakdown" class="space-y-3"></div>
+        </section>
+
+      </div>
+    </div>
+
+  </main>
+
+  <!-- "Analiz Edilecek Ligler" dropdown'ının JS'de checkbox listesi
+       oluşturabilmesi için TARGET_LEAGUES verisi (bkz. main.py index route) -->
+  <script id="leaguesData" type="application/json">{"ligue_1": {"id": 61, "name": "Ligue 1", "country": "Fransa"}, "bundesliga": {"id": 78, "name": "Bundesliga", "country": "Almanya"}, "premier_league": {"id": 39, "name": "Premier League", "country": "\u0130ngiltere"}, "la_liga": {"id": 140, "name": "La Liga", "country": "\u0130spanya"}, "primeira_liga": {"id": 94, "name": "Primeira Liga", "country": "Portekiz"}, "super_lig": {"id": 203, "name": "S\u00fcper Lig", "country": "T\u00fcrkiye"}, "tff_1_lig": {"id": 204, "name": "TFF 1. Lig", "country": "T\u00fcrkiye"}, "mls": {"id": 253, "name": "Major League Soccer", "country": "ABD"}, "liga_profesional_arjantin": {"id": 128, "name": "Liga Profesional", "country": "Arjantin"}, "afc_champions_league_elite": {"id": 17, "name": "AFC Champions League Elite", "country": "Asya"}, "azerbaycan_premyer_liqa": {"id": 419, "name": "Premyer Liqa", "country": "Azerbaycan"}, "bolivya_primera_division": {"id": 344, "name": "Primera Divisi\u00f3n", "country": "Bolivya"}, "brezilya_serie_a": {"id": 71, "name": "Brasileir\u00e3o Serie A", "country": "Brezilya"}, "brezilya_serie_b": {"id": 72, "name": "Brasileir\u00e3o Serie B", "country": "Brezilya"}, "bulgaristan_first_league": {"id": 172, "name": "First League (Efbet Lig)", "country": "Bulgaristan"}, "bulgaristan_second_league": {"id": 173, "name": "Second League (Victoria Liga)", "country": "Bulgaristan"}, "danimarka_superliga": {"id": 119, "name": "Superliga", "country": "Danimarka"}, "ecuador_liga_pro": {"id": 242, "name": "Liga Pro", "country": "Ecuador"}, "ermenistan_first_league": {"id": 343, "name": "First League", "country": "Ermenistan"}, "estonya_esiliiga": {"id": 328, "name": "Esiliiga A", "country": "Estonya"}, "finlandiya_veikkausliiga": {"id": 244, "name": "Veikkausliiga", "country": "Finlandiya"}, "ligue_2": {"id": 62, "name": "Ligue 2", "country": "Fransa"}, "hirvatistan_hnl": {"id": 210, "name": "HNL", "country": "H\u0131rvatistan"}, "hollanda_eerste_divisie": {"id": 89, "name": "Eerste Divisie", "country": "Hollanda"}, "irlanda_premier_division": {"id": 357, "name": "Premier Division", "country": "\u0130rlanda"}, "la_liga_2": {"id": 141, "name": "La Liga 2", "country": "\u0130spanya"}, "israil_ligat_haal": {"id": 383, "name": "Ligat Ha'al", "country": "\u0130srail"}, "israil_liga_leumit": {"id": 382, "name": "Liga Leumit", "country": "\u0130srail"}, "isvec_allsvenskan": {"id": 113, "name": "Allsvenskan", "country": "\u0130sve\u00e7"}, "isvec_superettan": {"id": 114, "name": "Superettan", "country": "\u0130sve\u00e7"}, "izlanda_urvalsdeild": {"id": 164, "name": "\u00darvalsdeild", "country": "\u0130zlanda"}, "japonya_j1_league": {"id": 98, "name": "J1 League", "country": "Japonya"}, "japonya_j2_league": {"id": 99, "name": "J2 League", "country": "Japonya"}, "kanada_premier_league": {"id": 479, "name": "Canadian Premier League", "country": "Kanada"}, "kolombiya_primera_a": {"id": 239, "name": "Primera A", "country": "Kolombiya"}, "kolombiya_primera_b": {"id": 240, "name": "Primera B", "country": "Kolombiya"}, "kosova_superliga": {"id": 664, "name": "Superliga", "country": "Kosova"}, "kuzey_makedonya_first_league": {"id": 371, "name": "First League", "country": "Kuzey Makedonya"}, "letonya_virsliga": {"id": 365, "name": "Virsliga", "country": "Letonya"}, "litvanya_a_lyga": {"id": 362, "name": "A Lyga", "country": "Litvanya"}, "malta_premier_league": {"id": 393, "name": "Premier League", "country": "Malta"}, "meksika_liga_mx": {"id": 262, "name": "Liga MX", "country": "Meksika"}, "misir_premier_league": {"id": 233, "name": "Premier League", "country": "M\u0131s\u0131r"}, "norvec_eliteserien": {"id": 103, "name": "Eliteserien", "country": "Norve\u00e7"}, "norvec_1_division": {"id": 104, "name": "1. Division", "country": "Norve\u00e7"}, "norvec_2_division_grup1": {"id": 473, "name": "2. Division - Group 1", "country": "Norve\u00e7"}, "norvec_2_division_grup2": {"id": 474, "name": "2. Division - Group 2", "country": "Norve\u00e7"}, "panama_lpf": {"id": 304, "name": "Liga Paname\u00f1a de F\u00fatbol", "country": "Panama"}, "paraguay_apertura": {"id": 250, "name": "Division Profesional - Apertura", "country": "Paraguay"}, "paraguay_clausura": {"id": 252, "name": "Division Profesional - Clausura", "country": "Paraguay"}, "polonya_ekstraklasa": {"id": 106, "name": "Ekstraklasa", "country": "Polonya"}, "polonya_i_liga": {"id": 107, "name": "I Liga", "country": "Polonya"}, "liga_portugal_2": {"id": 95, "name": "Liga Portugal 2", "country": "Portekiz"}, "romanya_liga_1": {"id": 283, "name": "Liga I", "country": "Romanya"}, "romanya_liga_2": {"id": 284, "name": "Liga II", "country": "Romanya"}, "rusya_premier_league": {"id": 235, "name": "Premier League", "country": "Rusya"}, "rusya_first_league": {"id": 236, "name": "First League", "country": "Rusya"}, "singapur_premier_league": {"id": 368, "name": "Premier League", "country": "Singapur"}, "sirbistan_super_liga": {"id": 286, "name": "Super Liga", "country": "S\u0131rbistan"}, "sirbistan_prva_liga": {"id": 287, "name": "Prva Liga", "country": "S\u0131rbistan"}, "suudi_arabistan_pro_league": {"id": 307, "name": "Pro League", "country": "Suudi Arabistan"}, "ukrayna_premier_league": {"id": 333, "name": "Premier League", "country": "Ukrayna"}, "ukrayna_persha_liga": {"id": 334, "name": "Persha Liga", "country": "Ukrayna"}, "yunanistan_super_league_1": {"id": 197, "name": "Super League 1", "country": "Yunanistan"}, "yunanistan_super_league_2": {"id": 494, "name": "Super League 2", "country": "Yunanistan"}, "avusturya_bundesliga": {"id": 218, "name": "Bundesliga", "country": "Avusturya"}, "avusturya_2_liga": {"id": 219, "name": "2. Liga", "country": "Avusturya"}, "belarus_vysshaya_liga": {"id": 116, "name": "Vysshaya Liga (Premier League)", "country": "Belarus"}, "belarus_pershaya_liga": {"id": 117, "name": "Pershaya Liga (1. Division)", "country": "Belarus"}, "almanya_3_liga": {"id": 80, "name": "3. Liga", "country": "Almanya"}, "cek_cumhuriyeti_1_lig": {"id": 345, "name": "Czech Liga", "country": "\u00c7ek Cumhuriyeti"}, "cek_cumhuriyeti_2_lig": {"id": 346, "name": "FNL", "country": "\u00c7ek Cumhuriyeti"}, "cin_super_ligi": {"id": 169, "name": "Super League", "country": "\u00c7in"}, "cin_league_one": {"id": 170, "name": "League One", "country": "\u00c7in"}, "endonezya_liga_1": {"id": 274, "name": "Liga 1", "country": "Endonezya"}, "galler_cymru_premier": {"id": 110, "name": "Cymru Premier (Premier League)", "country": "Galler"}, "hirvatistan_first_nl": {"id": 211, "name": "First NL", "country": "H\u0131rvatistan"}, "ingiltere_championship": {"id": 40, "name": "Championship", "country": "\u0130ngiltere"}, "ingiltere_league_one": {"id": 41, "name": "League One", "country": "\u0130ngiltere"}, "ingiltere_league_two": {"id": 42, "name": "League Two", "country": "\u0130ngiltere"}, "ingiltere_national_league": {"id": 43, "name": "National League", "country": "\u0130ngiltere"}, "isvicre_super_league": {"id": 207, "name": "Super League", "country": "\u0130svi\u00e7re"}, "isvicre_challenge_league": {"id": 208, "name": "Challenge League", "country": "\u0130svi\u00e7re"}, "kazakistan_premier_league": {"id": 389, "name": "Premier League", "country": "Kazakistan"}, "kuzey_irlanda_premiership": {"id": 408, "name": "Premiership", "country": "Kuzey \u0130rlanda"}, "macaristan_nb_i": {"id": 271, "name": "NB I", "country": "Macaristan"}, "moldova_super_liga": {"id": 394, "name": "Super Liga", "country": "Moldova"}, "tff_2_lig": {"id": 205, "name": "2. Lig (Beyaz + K\u0131rm\u0131z\u0131 Grup)", "country": "T\u00fcrkiye"}, "sili_primera_division": {"id": 265, "name": "Primera Divisi\u00f3n", "country": "\u015eili"}, "sili_primera_b_ascenso": {"id": 266, "name": "Primera B (Ascenso)", "country": "\u015eili"}, "belcika_jupiler_pro_league": {"id": 144, "name": "Jupiler Pro League", "country": "Bel\u00e7ika"}, "belcika_challenger_pro_league": {"id": 145, "name": "Challenger Pro League", "country": "Bel\u00e7ika"}}</script>
+
+  <!-- Toast bildirimi -->
+  <div
+    id="toast"
+    class="pointer-events-none fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+1rem)] z-30 mx-auto max-w-md translate-y-4 rounded-xl border px-4 py-3 text-sm font-medium opacity-0 shadow-2xl transition-all duration-300"
+  ></div>
+
+  <script>
+    const todayStr = "2026-11-24";
+    const ALL_LEAGUES = JSON.parse(document.getElementById("leaguesData").textContent);
+    const ALL_LEAGUE_IDS = Object.values(ALL_LEAGUES).map((l) => l.id);
+
+    const state = {
+      date: document.getElementById("datePicker").value || todayStr,
+      leagueId: "ALL",
+      // "Analiz Edilecek Ligler" seçimi -- varsayılan: hepsi seçili
+      selectedLeagueIds: new Set(ALL_LEAGUE_IDS),
+    };
+
+    const reportsContainer = document.getElementById("reportsContainer");
+    const firstHalfContainer = document.getElementById("firstHalfContainer");
+    const analyzeBtn = document.getElementById("analyzeBtn");
+    const analyzeBtnIcon = document.getElementById("analyzeBtnIcon");
+    const analyzeBtnLabel = document.getElementById("analyzeBtnLabel");
+    const forceReanalyzeCheckbox = document.getElementById("forceReanalyzeCheckbox");
+    const toastEl = document.getElementById("toast");
+
+    let pollTimer = null;
+
+    // ---------------------------------------------------------------
+    // Tahmin Sonuçları: geçmiş tarih seçildiğinde her kartın yanında
+    // kazandı/kaybetti rozetini göstermek için piyasa bazlı match_id ->
+    // sonuç eşlemesi (bkz. fetchPredictionPerformance, Faz 10).
+    // ---------------------------------------------------------------
+    let resultsMap = { ms_gol_ustu: {}, ilk_yari_1: {}, over_2_5: {}, btts: {} };
+
+    const RESULT_STATUS_STYLES = {
+      kazandi: { label: "✅ Kazandı", cls: "border-emerald-500/40 bg-emerald-500/15 text-emerald-400" },
+      kaybetti: { label: "❌ Kaybetti", cls: "border-rose-500/40 bg-rose-500/15 text-rose-400" },
+      beklemede: { label: "⏳ Beklemede", cls: "border-slate-600/50 bg-slate-700/20 text-slate-400" },
+      veri_eksik: { label: "⚠️ Veri Eksik", cls: "border-amber-600/40 bg-amber-600/10 text-amber-400" },
+    };
+
+    function formatActualScore(entry) {
+      if (!entry || !entry.actual_score || entry.actual_score.home_score === null || entry.actual_score.home_score === undefined) {
+        return "";
+      }
+      const { home_score, away_score, halftime_home, halftime_away } = entry.actual_score;
+      let txt = `${home_score}-${away_score}`;
+      if (halftime_home !== null && halftime_home !== undefined) {
+        txt += ` (İY ${halftime_home}-${halftime_away})`;
+      }
+      return txt;
+    }
+
+    function renderResultBadge(marketKey, matchId) {
+      const entry = (resultsMap[marketKey] || {})[matchId];
+      if (!entry) return "";
+      const style = RESULT_STATUS_STYLES[entry.result_status] || RESULT_STATUS_STYLES.beklemede;
+      const scoreTxt = formatActualScore(entry);
+      return `
+        <div class="mt-2.5 flex items-center justify-between gap-2 rounded-xl border ${style.cls} px-3 py-1.5">
+          <span class="text-xs font-bold">${style.label}</span>
+          ${scoreTxt ? `<span class="font-mono text-xs text-slate-400">${scoreTxt}</span>` : ""}
+        </div>
+      `;
+    }
+
+    // ---------------------------------------------------------------
+    // Yardımcılar
+    // ---------------------------------------------------------------
+
+    function escapeHtml(value) {
+      const div = document.createElement("div");
+      div.textContent = value ?? "";
+      return div.innerHTML;
+    }
+
+    function showToast(message, isError = false) {
+      toastEl.textContent = message;
+      toastEl.className =
+        "fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+1rem)] z-30 mx-auto max-w-md rounded-xl border px-4 py-3 text-sm font-medium shadow-2xl transition-all duration-300 " +
+        (isError
+          ? "border-rose-500/40 bg-rose-950/90 text-rose-200"
+          : "border-indigo-500/40 bg-indigo-950/90 text-indigo-200");
+      requestAnimationFrame(() => {
+        toastEl.style.opacity = "1";
+        toastEl.style.transform = "translateY(0)";
+      });
+      clearTimeout(showToast._timer);
+      showToast._timer = setTimeout(() => {
+        toastEl.style.opacity = "0";
+        toastEl.style.transform = "translateY(1rem)";
+      }, 4000);
+    }
+
+    function formBadge(code) {
+      const styles = {
+        W: "bg-emerald-500/15 text-emerald-400 border-emerald-500/40",
+        D: "bg-slate-700/50 text-slate-300 border-slate-600/60",
+        L: "bg-rose-500/15 text-rose-400 border-rose-500/40",
+      };
+      const cls = styles[code] || styles.D;
+      return `<span class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-[10px] font-bold ${cls}">${code}</span>`;
+    }
+
+    // Aşama A (MS/Gol Üstü) VE İlk Yarı 1 kartlarında ortak kullanılan oran rozeti.
+    // odds=null ise (Bet365'te bu maç/piyasa bulunamadıysa) "oran yok" gösterir;
+    // odds_source "varsayılan" ile başlıyorsa (config.DEFAULT_ODDS'a düşülmüş demektir)
+    // bunu açıkça belirtir -- gerçek piyasa oranıyla karıştırılmasın diye.
+    function formatOddsChip(odds, oddsSource) {
+      if (odds === null || odds === undefined) {
+        return `<span class="inline-flex items-center gap-1 rounded-full border border-slate-800 bg-slate-900 px-2.5 py-1 text-[11px] text-slate-600">📊 Oran bulunamadı</span>`;
+      }
+      const isDefault = typeof oddsSource === "string" && oddsSource.startsWith("varsayılan");
+      const label = isDefault ? `${odds} (varsayılan)` : `${odds}`;
+      return `<span class="inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-[11px] font-bold text-slate-300">📊 Oran ${label}</span>`;
+    }
+
+    // ---------------------------------------------------------------
+    // Kart / Boş Durum / İskelet (Skeleton) Render
+    // ---------------------------------------------------------------
+
+    function renderCard(r) {
+      const confClass =
+        r.confidence_score >= 70
+          ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/40"
+          : "bg-slate-700/40 text-slate-300 border-slate-600/60";
+
+      const valueBetChip = r.is_value_bet
+        ? `<span class="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-bold text-amber-400">💰 VALUE BET</span>`
+        : "";
+
+      const oddsChip = formatOddsChip(r.odds, r.odds_source);
+
+      const homeForm = (r.home_team.form || []).map(formBadge).join("");
+      const awayForm = (r.away_team.form || []).map(formBadge).join("");
+
+      return `
+        <article class="card-enter rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-lg shadow-black/20">
+          <div class="flex items-center justify-between text-xs text-slate-500">
+            <span class="font-semibold uppercase tracking-wide text-indigo-400/90">${escapeHtml(r.league_name)}</span>
+            <span>⏱ ${escapeHtml(r.kickoff_time)}</span>
+          </div>
+
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-bold ${confClass}">
+              Güven %${r.confidence_score}
+            </span>
+            ${oddsChip}
+            ${valueBetChip}
+          </div>
+
+          <div class="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <div class="min-w-0 text-right">
+              <p class="truncate font-semibold text-slate-100">${escapeHtml(r.home_team.name)}</p>
+              <div class="mt-1.5 flex justify-end gap-1">${homeForm}</div>
+            </div>
+            <span class="px-1 text-[11px] font-bold text-slate-600">VS</span>
+            <div class="min-w-0 text-left">
+              <p class="truncate font-semibold text-slate-100">${escapeHtml(r.away_team.name)}</p>
+              <div class="mt-1.5 flex justify-start gap-1">${awayForm}</div>
+            </div>
+          </div>
+
+          <div class="mt-3 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-center">
+            <p class="text-sm font-bold text-indigo-300">${escapeHtml(r.recommendation || "—")}</p>
+          </div>
+
+          <div class="mt-3 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+            <p class="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">AI Analiz Özeti</p>
+            <p class="text-sm leading-relaxed text-slate-400">${escapeHtml(r.reasoning || "")}</p>
+          </div>
+          ${renderResultBadge("ms_gol_ustu", r.match_id)}
+        </article>
+      `;
+    }
+
+    function renderEmptyState() {
+      reportsContainer.innerHTML = `
+        <div class="flex flex-col items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/40 px-6 py-16 text-center">
+          <div class="mb-4 text-5xl">🔍⚽</div>
+          <p class="text-base font-semibold text-slate-200">
+            Bugün kritere uyan yüksek potansiyelli maç bulunamadı.
+          </p>
+          <p class="mt-2 text-sm text-slate-500">
+            Farklı bir tarih deneyin ya da lig filtresini değiştirin.
+          </p>
+        </div>
+      `;
+    }
+
+    function renderLoadingSkeleton() {
+      reportsContainer.innerHTML = Array.from({ length: 3 })
+        .map(
+          () => `
+        <div class="animate-pulse rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+          <div class="h-3 w-24 rounded bg-slate-800"></div>
+          <div class="mt-3 h-6 w-32 rounded-full bg-slate-800"></div>
+          <div class="mt-4 h-10 rounded bg-slate-800"></div>
+          <div class="mt-3 h-9 rounded-xl bg-slate-800"></div>
+          <div class="mt-3 h-16 rounded-xl bg-slate-800"></div>
+        </div>
+      `
+        )
+        .join("");
+    }
+
+    function renderErrorState(message) {
+      reportsContainer.innerHTML = `
+        <div class="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-center text-sm text-rose-300">
+          Veriler yüklenirken bir hata oluştu: ${escapeHtml(message)}
+        </div>
+      `;
+    }
+
+    // ---------------------------------------------------------------
+    // Veri Çekme
+    // ---------------------------------------------------------------
+
+    async function fetchReports() {
+      renderLoadingSkeleton();
+      try {
+        const url = `/api/reports?date=${encodeURIComponent(state.date)}&league_id=${encodeURIComponent(state.leagueId)}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (!data.reports || data.reports.length === 0) {
+          renderEmptyState();
+        } else {
+          reportsContainer.innerHTML = data.reports.map(renderCard).join("");
+        }
+      } catch (err) {
+        renderErrorState(err.message);
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // İlk Yarı 1 Adayları (Aşama A'dan bağımsız ikinci strateji)
+    // ---------------------------------------------------------------
+
+    const FIRST_HALF_SIGNAL_LABELS = {
+      "home_attack_pg>=2.2": "Yüksek Hücum Gücü (≥2.2 gol/maç, son 5 maç)",
+      "home_venue_form>=9.0": "Kendi Sahasında Zirve Form (9/9 puan, son 3 maç)",
+      "home_goal_pressure>=3.8": "Yüksek Gol Baskısı (hücum + rakibin savunma zaafı)",
+      "attack_strength_gap>=1.0": "Hücum Üstünlüğü (rakibe göre çok daha golcü)",
+      "defense_weakness_gap>=1.0": "Rakip Savunma Zaafı (deplasman çok daha fazla gol yiyor)",
+    };
+
+    function renderFirstHalfCard(c) {
+      const signalsHtml = (c.matched_signals || [])
+        .map(
+          (s) => `
+            <span class="inline-flex items-center rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-300">
+              ${escapeHtml(FIRST_HALF_SIGNAL_LABELS[s] || s)}
+            </span>`
+        )
+        .join("");
+
+      // [GÜNCELLEME 2026-09-24] İY1 artık Over 2.5 ile AYNI iki katmanlı
+      // güven sistemine sahip -- bkz. createGoalMarketSection'daki AYNI blok.
+      const confidenceBadgeHtml =
+        c.confidence_tier === "yuksek_isabet"
+          ? `<span class="inline-flex items-center gap-1 rounded-full border border-yellow-400/50 bg-yellow-400/15 px-2.5 py-1 text-xs font-bold text-yellow-300">
+               🎯 Yüksek İsabet
+             </span>`
+          : c.confidence_tier === "dengeli"
+          ? `<span class="inline-flex items-center gap-1 rounded-full border border-slate-500/40 bg-slate-500/10 px-2.5 py-1 text-xs font-bold text-slate-300">
+               ⚖️ Dengeli
+             </span>`
+          : "";
+
+      return `
+        <article class="card-enter rounded-2xl border border-cyan-800/50 bg-cyan-950/10 p-4 shadow-lg shadow-black/20">
+          <div class="flex items-center justify-between text-xs text-slate-500">
+            <span class="font-semibold uppercase tracking-wide text-cyan-400/90">${escapeHtml(c.league_name)}</span>
+            <span>⏱ ${escapeHtml(c.kickoff_time)}</span>
+          </div>
+
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="inline-flex items-center rounded-full border border-cyan-500/40 bg-cyan-500/15 px-2.5 py-1 text-xs font-bold text-cyan-300">
+              Geçmiş İsabet ~%${c.historical_hit_rate}
+            </span>
+            ${confidenceBadgeHtml}
+            ${formatOddsChip(c.odds, c.odds_source)}
+          </div>
+
+          <div class="mt-3 text-center">
+            <p class="truncate text-sm font-semibold text-slate-100">
+              ${escapeHtml(c.home_team_name)} <span class="text-slate-600">vs</span> ${escapeHtml(c.away_team_name)}
+            </p>
+          </div>
+
+          <div class="mt-3 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-center">
+            <p class="text-sm font-bold text-cyan-300">${escapeHtml(c.recommendation)}</p>
+          </div>
+
+          <div class="mt-2.5 flex flex-wrap gap-1.5">${signalsHtml}</div>
+          ${renderResultBadge("ilk_yari_1", c.match_id)}
+        </article>
+      `;
+    }
+
+    function renderFirstHalfEmptyState() {
+      firstHalfContainer.innerHTML = `
+        <div class="rounded-2xl border border-slate-800 bg-slate-900/40 px-4 py-8 text-center">
+          <p class="text-sm text-slate-500">Bu tarihte İlk Yarı 1 kriterine uyan maç bulunamadı.</p>
+        </div>
+      `;
+    }
+
+    function renderFirstHalfLoadingSkeleton() {
+      firstHalfContainer.innerHTML = `
+        <div class="animate-pulse rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+          <div class="h-3 w-24 rounded bg-slate-800"></div>
+          <div class="mt-3 h-6 w-32 rounded-full bg-slate-800"></div>
+          <div class="mt-4 h-9 rounded-xl bg-slate-800"></div>
+        </div>
+      `;
+    }
+
+    function renderFirstHalfErrorState(message) {
+      firstHalfContainer.innerHTML = `
+        <div class="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-center text-sm text-rose-300">
+          İlk Yarı 1 verileri yüklenirken bir hata oluştu: ${escapeHtml(message)}
+        </div>
+      `;
+    }
+
+    async function fetchFirstHalfCandidates() {
+      renderFirstHalfLoadingSkeleton();
+      try {
+        const url = `/api/first-half-candidates?date=${encodeURIComponent(state.date)}&league_id=${encodeURIComponent(state.leagueId)}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (!data.candidates || data.candidates.length === 0) {
+          renderFirstHalfEmptyState();
+        } else {
+          firstHalfContainer.innerHTML = data.candidates.map(renderFirstHalfCard).join("");
+        }
+      } catch (err) {
+        renderFirstHalfErrorState(err.message);
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // Toplam Gol 2.5 Üstü / Karşılıklı Gol Adayları (Aşama A ve İlk Yarı
+    // 1'den bağımsız üçüncü/dördüncü stratejiler) -- ikisi de aynı "iki
+    // taraflı" sinyal şemasını paylaştığı için tek bir ortak fabrika
+    // fonksiyonuyla üretilir (renderFirstHalfCard'ın genelleştirilmiş hâli).
+    // ---------------------------------------------------------------
+
+    const OVER25_SIGNAL_LABELS = {
+      "combined_goal_pressure>=7.0": "Yüksek Toplam Gol Baskısı (iki takım birlikte)",
+      "home_goal_pressure>=3.8": "Ev Sahibi Gol Baskısı (hücum + rakip savunma zaafı)",
+      "combined_attack_pg>=2.1": "İki Takımın Toplam Hücum Gücü Yüksek",
+      "attack_strength_gap>=1.0": "Ev Sahibi Hücumu Deplasmandan Belirgin Üstün",
+      "home_attack_pg>=1.8": "Ev Sahibi Yüksek Hücum Gücü (≥1.8 gol/maç)",
+    };
+
+    const BTTS_SIGNAL_LABELS = {
+      "combined_goal_pressure>=7.0": "Yüksek Toplam Gol Baskısı (iki takım birlikte)",
+      "combined_attack_pg>=2.1": "İki Takımın Toplam Hücum Gücü Yüksek",
+      "away_attack_pg>=2.0": "Deplasman Takımı Güçlü Hücum (≥2.0 gol/maç)",
+      "home_goal_pressure>=3.8": "Ev Sahibi Gol Baskısı (hücum + rakip savunma zaafı)",
+    };
+
+    function createGoalMarketSection(containerId, apiPath, signalLabels, theme, marketKey) {
+      const container = document.getElementById(containerId);
+
+      function renderCard(c) {
+        const signalsHtml = (c.matched_signals || [])
+          .map(
+            (s) => `
+              <span class="inline-flex items-center rounded-full border ${theme.chipBorder} ${theme.chipBg} px-2 py-0.5 text-[10px] font-semibold ${theme.chipText}">
+                ${escapeHtml(signalLabels[s] || s)}
+              </span>`
+          )
+          .join("");
+
+        // [GÜNCELLEME 2026-09-24] confidence_tier artık Over 2.5 VE İY1'de var
+        // (renderFirstHalfCard'da aynı blok); btts'te YOK -- K4 tutarlı
+        // çıkmadığı için tek katmanda bırakıldı (bkz. analyzer.py). Alan
+        // yoksa hiçbir rozet basılmaz, geriye dönük uyumlu kalır.
+        const confidenceBadgeHtml =
+          c.confidence_tier === "yuksek_isabet"
+            ? `<span class="inline-flex items-center gap-1 rounded-full border border-yellow-400/50 bg-yellow-400/15 px-2.5 py-1 text-xs font-bold text-yellow-300">
+                 🎯 Yüksek İsabet
+               </span>`
+            : c.confidence_tier === "dengeli"
+            ? `<span class="inline-flex items-center gap-1 rounded-full border border-slate-500/40 bg-slate-500/10 px-2.5 py-1 text-xs font-bold text-slate-300">
+                 ⚖️ Dengeli
+               </span>`
+            : "";
+
+        return `
+          <article class="card-enter rounded-2xl border ${theme.cardBorder} ${theme.cardBg} p-4 shadow-lg shadow-black/20">
+            <div class="flex items-center justify-between text-xs text-slate-500">
+              <span class="font-semibold uppercase tracking-wide ${theme.leagueText}">${escapeHtml(c.league_name)}</span>
+              <span>⏱ ${escapeHtml(c.kickoff_time)}</span>
+            </div>
+
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <span class="inline-flex items-center rounded-full border ${theme.badgeBorder} ${theme.badgeBg} px-2.5 py-1 text-xs font-bold ${theme.badgeText}">
+                Geçmiş İsabet ~%${c.historical_hit_rate}
+              </span>
+              ${confidenceBadgeHtml}
+              ${formatOddsChip(c.odds, c.odds_source)}
+            </div>
+
+            <div class="mt-3 text-center">
+              <p class="truncate text-sm font-semibold text-slate-100">
+                ${escapeHtml(c.home_team_name)} <span class="text-slate-600">vs</span> ${escapeHtml(c.away_team_name)}
+              </p>
+            </div>
+
+            <div class="mt-3 rounded-xl border ${theme.recBorder} ${theme.recBg} px-3 py-2 text-center">
+              <p class="text-sm font-bold ${theme.recText}">${escapeHtml(c.recommendation)}</p>
+            </div>
+
+            <div class="mt-2.5 flex flex-wrap gap-1.5">${signalsHtml}</div>
+            ${renderResultBadge(marketKey, c.match_id)}
+          </article>
+        `;
+      }
+
+      function renderEmptyState() {
+        container.innerHTML = `
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/40 px-4 py-8 text-center">
+            <p class="text-sm text-slate-500">Bu tarihte ${theme.label} kriterine uyan maç bulunamadı.</p>
+          </div>
+        `;
+      }
+
+      function renderLoadingSkeleton() {
+        container.innerHTML = `
+          <div class="animate-pulse rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+            <div class="h-3 w-24 rounded bg-slate-800"></div>
+            <div class="mt-3 h-6 w-32 rounded-full bg-slate-800"></div>
+            <div class="mt-4 h-9 rounded-xl bg-slate-800"></div>
+          </div>
+        `;
+      }
+
+      function renderErrorState(message) {
+        container.innerHTML = `
+          <div class="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-center text-sm text-rose-300">
+            ${theme.label} verileri yüklenirken bir hata oluştu: ${escapeHtml(message)}
+          </div>
+        `;
+      }
+
+      async function fetchCandidates() {
+        renderLoadingSkeleton();
+        try {
+          const url = `${apiPath}?date=${encodeURIComponent(state.date)}&league_id=${encodeURIComponent(state.leagueId)}`;
+          const res = await fetch(url);
+          if (!res.ok) {
+            const errBody = await res.json().catch(() => ({}));
+            throw new Error(errBody.detail || `HTTP ${res.status}`);
+          }
+          const data = await res.json();
+          if (!data.candidates || data.candidates.length === 0) {
+            renderEmptyState();
+          } else {
+            container.innerHTML = data.candidates.map(renderCard).join("");
+          }
+        } catch (err) {
+          renderErrorState(err.message);
+        }
+      }
+
+      return { fetchCandidates };
+    }
+
+    const over25Section = createGoalMarketSection("over25Container", "/api/over25-candidates", OVER25_SIGNAL_LABELS, {
+      label: "Toplam Gol 2.5 Üstü",
+      chipBorder: "border-amber-500/40", chipBg: "bg-amber-500/10", chipText: "text-amber-300",
+      cardBorder: "border-amber-800/50", cardBg: "bg-amber-950/10",
+      leagueText: "text-amber-400/90",
+      badgeBorder: "border-amber-500/40", badgeBg: "bg-amber-500/15", badgeText: "text-amber-300",
+      recBorder: "border-amber-500/30", recBg: "bg-amber-500/10", recText: "text-amber-300",
+    }, "over_2_5");
+
+    const bttsSection = createGoalMarketSection("bttsContainer", "/api/btts-candidates", BTTS_SIGNAL_LABELS, {
+      label: "Karşılıklı Gol",
+      chipBorder: "border-emerald-500/40", chipBg: "bg-emerald-500/10", chipText: "text-emerald-300",
+      cardBorder: "border-emerald-800/50", cardBg: "bg-emerald-950/10",
+      leagueText: "text-emerald-400/90",
+      badgeBorder: "border-emerald-500/40", badgeBg: "bg-emerald-500/15", badgeText: "text-emerald-300",
+      recBorder: "border-emerald-500/30", recBg: "bg-emerald-500/10", recText: "text-emerald-300",
+    }, "btts");
+
+    function refreshAllViews() {
+      fetchReports();
+      fetchFirstHalfCandidates();
+      over25Section.fetchCandidates();
+      bttsSection.fetchCandidates();
+      fetchPredictionPerformance();
+    }
+
+    // ---------------------------------------------------------------
+    // "Analiz Edilecek Ligler" Dropdown (fetch kapsamını kontrol eder)
+    // ---------------------------------------------------------------
+
+    const leagueSelectToggle = document.getElementById("leagueSelectToggle");
+    const leagueSelectPanel = document.getElementById("leagueSelectPanel");
+    const leagueSelectCount = document.getElementById("leagueSelectCount");
+    const leagueSelectChevron = document.getElementById("leagueSelectChevron");
+    const leagueCheckboxList = document.getElementById("leagueCheckboxList");
+    const leagueSelectAllBtn = document.getElementById("leagueSelectAllBtn");
+    const leagueSelectNoneBtn = document.getElementById("leagueSelectNoneBtn");
+
+    function updateLeagueSelectCount() {
+      leagueSelectCount.textContent = `${state.selectedLeagueIds.size}/${ALL_LEAGUE_IDS.length}`;
+    }
+
+    function renderLeagueCheckboxes() {
+      leagueCheckboxList.innerHTML = Object.values(ALL_LEAGUES)
+        .map(
+          (info) => `
+            <label class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-slate-300 transition hover:bg-slate-800/60">
+              <input
+                type="checkbox"
+                data-league-id="${info.id}"
+                class="league-checkbox h-3.5 w-3.5 shrink-0 rounded border-slate-700 bg-slate-950 accent-indigo-600"
+                ${state.selectedLeagueIds.has(info.id) ? "checked" : ""}
+              />
+              <span class="truncate">${escapeHtml(info.name)} <span class="text-slate-600">(${escapeHtml(info.country)})</span></span>
+            </label>
+          `
+        )
+        .join("");
+
+      leagueCheckboxList.querySelectorAll(".league-checkbox").forEach((cb) => {
+        cb.addEventListener("change", (e) => {
+          const id = Number(e.target.dataset.leagueId);
+          if (e.target.checked) {
+            state.selectedLeagueIds.add(id);
+          } else {
+            state.selectedLeagueIds.delete(id);
+          }
+          updateLeagueSelectCount();
+        });
+      });
+    }
+
+    renderLeagueCheckboxes();
+    updateLeagueSelectCount();
+
+    leagueSelectToggle.addEventListener("click", () => {
+      const willShow = leagueSelectPanel.classList.contains("hidden");
+      leagueSelectPanel.classList.toggle("hidden", !willShow);
+      leagueSelectChevron.textContent = willShow ? "▴" : "▾";
+    });
+
+    leagueSelectAllBtn.addEventListener("click", () => {
+      state.selectedLeagueIds = new Set(ALL_LEAGUE_IDS);
+      renderLeagueCheckboxes();
+      updateLeagueSelectCount();
+    });
+
+    leagueSelectNoneBtn.addEventListener("click", () => {
+      state.selectedLeagueIds = new Set();
+      renderLeagueCheckboxes();
+      updateLeagueSelectCount();
+    });
+
+    // ---------------------------------------------------------------
+    // "Bugünü Analiz Et" Tetikleme + Durum Sorgulama (Polling)
+    // ---------------------------------------------------------------
+
+    function analyzeButtonIdleLabel() {
+      // Seçili tarih bugünse "Bugünü Analiz Et", değilse tarihi açıkça göster --
+      // böylece hangi günün analiz edileceği butondan da anlaşılır.
+      return state.date === todayStr ? "Bugünü Analiz Et" : `${state.date} Tarihini Analiz Et`;
+    }
+
+    function setAnalyzeButtonBusy(isBusy) {
+      analyzeBtn.disabled = isBusy;
+      analyzeBtnIcon.textContent = isBusy ? "⏳" : "⚡";
+      analyzeBtnLabel.textContent = isBusy ? "Analiz ediliyor..." : analyzeButtonIdleLabel();
+    }
+
+    // Faz 9: /api/trigger-analysis/status artık "fetch" fazında ilerleme
+    // yüzdesi (progress_current/progress_total/progress_pct) döndürüyor --
+    // bunu buton etiketinde göster, böylece "ne kadar kaldı" görünür olur.
+    function updateAnalyzeProgress(status) {
+      if (!status || !status.running) return;
+      if (status.phase === "fetch" && status.progress_total > 0) {
+        const pct = status.progress_pct != null
+          ? status.progress_pct
+          : Math.round((status.progress_current / status.progress_total) * 100);
+        analyzeBtnLabel.textContent =
+          `Veri çekiliyor... %${pct} (${status.progress_current}/${status.progress_total} lig)`;
+      } else if (status.phase === "analyze") {
+        analyzeBtnLabel.textContent = "Analiz ediliyor... (adaylar taranıyor)";
+      } else {
+        analyzeBtnLabel.textContent = "Analiz ediliyor...";
+      }
+    }
+
+    async function triggerAnalysis() {
+      if (state.selectedLeagueIds.size === 0) {
+        showToast("Lütfen en az bir lig seçin (🏆 Analiz Edilecek Ligler).", true);
+        return;
+      }
+
+      setAnalyzeButtonBusy(true);
+      try {
+        const params = new URLSearchParams();
+        // Tarih seçicide hangi tarih seçiliyse O GÜN analiz edilir -- eskiden
+        // bu parametre hiç gönderilmiyordu ve backend her zaman bugünü
+        // analiz ediyordu, tarih seçimi göz ardı ediliyordu.
+        params.set("date", state.date);
+        // Hepsi seçiliyse league_ids hiç göndermiyoruz -- backend'de bu,
+        // TÜM TARGET_LEAGUES'ın işlenmesi anlamına gelir (eski davranış).
+        if (state.selectedLeagueIds.size < ALL_LEAGUE_IDS.length) {
+          params.set("league_ids", Array.from(state.selectedLeagueIds).join(","));
+        }
+        // Faz 9: "🔄 Baştan Analiz Et" kutusu işaretliyse, backend'e force=true
+        // gönderiyoruz -- bu tarih için ZATEN çekilmiş/analiz edilmiş
+        // ligler/maçlar bile yeniden çekilip yeniden hesaplanır.
+        if (forceReanalyzeCheckbox && forceReanalyzeCheckbox.checked) {
+          params.set("force", "true");
+        }
+        const qs = params.toString();
+        const res = await fetch(`/api/trigger-analysis${qs ? "?" + qs : ""}`, { method: "POST" });
+        const data = await res.json();
+        showToast(data.message || "Analiz başlatıldı.", res.status === 409 && false);
+        // "Baştan Analiz Et" kutusunu istek gönderildikten sonra otomatik
+        // işaretsiz bırakıyoruz -- kullanıcı unutup bir dahaki analizi de
+        // yanlışlıkla (gereksiz API maliyetiyle) force ile çalıştırmasın.
+        if (forceReanalyzeCheckbox) forceReanalyzeCheckbox.checked = false;
+        if (res.status === 409) {
+          // Zaten çalışıyor: yine de durumu izlemeye devam et
+          startPolling();
+          return;
+        }
+        startPolling();
+      } catch (err) {
+        showToast("Analiz tetiklenemedi: " + err.message, true);
+        setAnalyzeButtonBusy(false);
+      }
+    }
+
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(async () => {
+        try {
+          const res = await fetch("/api/trigger-analysis/status");
+          const status = await res.json();
+          if (!status.running) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+            setAnalyzeButtonBusy(false);
+            showToast(status.last_message || "Analiz tamamlandı.", status.last_status === "error");
+            // Analiz artık her zaman o an tarih seçicide seçili olan günü
+            // hedeflediği için (bkz. triggerAnalysis), tamamlanınca listeleri
+            // koşulsuz yenile -- görüntülenen tarih zaten analiz edilen tarih.
+            refreshAllViews();
+          } else {
+            updateAnalyzeProgress(status);
+          }
+        } catch (err) {
+          // Ağ hatasında polling'i sessizce durdurma; bir sonraki turda tekrar dener
+        }
+      }, 1500);
+    }
+
+    // ---------------------------------------------------------------
+    // Olay Dinleyicileri
+    // ---------------------------------------------------------------
+
+    document.getElementById("datePicker").addEventListener("change", (e) => {
+      state.date = e.target.value;
+      // Analiz o an çalışmıyorsa buton etiketini seçilen tarihe göre güncelle
+      // (bkz. analyzeButtonIdleLabel) -- çalışıyorsa "Analiz ediliyor..." kalsın.
+      if (!analyzeBtn.disabled) {
+        analyzeBtnLabel.textContent = analyzeButtonIdleLabel();
+      }
+      refreshAllViews();
+    });
+
+    document.querySelectorAll(".league-chip").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".league-chip").forEach((b) => b.classList.remove("league-chip-active"));
+        btn.classList.add("league-chip-active");
+        state.leagueId = btn.dataset.leagueId;
+        refreshAllViews();
+      });
+    });
+
+    analyzeBtn.addEventListener("click", triggerAnalysis);
+
+    // İlk yükleme: sayfa açılır açılmaz bugünün raporlarını (her iki strateji) çek
+    refreshAllViews();
+    fetchCumulativePerformance();
+
+    // ---------------------------------------------------------------
+    // Faz 4: Backtest & Algoritma Başarısı Sekmesi
+    // ---------------------------------------------------------------
+
+    const reportsView = document.getElementById("reportsView");
+    const backtestView = document.getElementById("backtestView");
+    const tabReportsBtn = document.getElementById("tabReportsBtn");
+    const tabBacktestBtn = document.getElementById("tabBacktestBtn");
+
+    const btMarket = document.getElementById("btMarket");
+    const btMinConfidenceLabel = document.getElementById("btMinConfidenceLabel");
+    const btMinConfidenceNote = document.getElementById("btMinConfidenceNote");
+    const btResultMarketLabel = document.getElementById("btResultMarketLabel");
+    const btStartDate = document.getElementById("btStartDate");
+    const btEndDate = document.getElementById("btEndDate");
+    const btMinConfidence = document.getElementById("btMinConfidence");
+    const btUnitStake = document.getElementById("btUnitStake");
+    const btSkipXg = document.getElementById("btSkipXg");
+
+    // "Min. Güven Skoru" sadece MS/Gol Üstü'nde anlamlı -- diğer 3 piyasada
+    // (İlk Yarı 1 / 2.5 Üstü / KG Var) canlı pipeline'ın SABİT kuralı test
+    // edilir, süzülebilir bir eşik yoktur (bkz. backtester._production_rule_matched).
+    function updateMarketFieldVisibility() {
+      const isThresholdMarket = btMarket.value === "ms_gol_ustu";
+      btMinConfidenceLabel.classList.toggle("hidden", !isThresholdMarket);
+      btMinConfidenceNote.classList.toggle("hidden", isThresholdMarket);
+    }
+    btMarket.addEventListener("change", updateMarketFieldVisibility);
+    updateMarketFieldVisibility();
+    const runBacktestBtn = document.getElementById("runBacktestBtn");
+    const runBacktestBtnIcon = document.getElementById("runBacktestBtnIcon");
+    const runBacktestBtnLabel = document.getElementById("runBacktestBtnLabel");
+    const backtestProgress = document.getElementById("backtestProgress");
+    const backtestProgressText = document.getElementById("backtestProgressText");
+    const backtestProgressPct = document.getElementById("backtestProgressPct");
+    const backtestProgressBar = document.getElementById("backtestProgressBar");
+
+    const backtestEmptyState = document.getElementById("backtestEmptyState");
+    const backtestSummaryContent = document.getElementById("backtestSummaryContent");
+    const btRangeLabel = document.getElementById("btRangeLabel");
+    const btHitRateBadge = document.getElementById("btHitRateBadge");
+    const btBetCountLabel = document.getElementById("btBetCountLabel");
+    const btNetProfit = document.getElementById("btNetProfit");
+    const btRoi = document.getElementById("btRoi");
+    const btBankroll = document.getElementById("btBankroll");
+    const btBestBetTypeCallout = document.getElementById("btBestBetTypeCallout");
+    const btBestBetTypeText = document.getElementById("btBestBetTypeText");
+    const btLeagueBreakdown = document.getElementById("btLeagueBreakdown");
+
+    let backtestPollTimer = null;
+
+    // Form için makul varsayılan tarih aralığı: son 90 gün.
+    (function initBacktestDateDefaults() {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 90);
+      btEndDate.value = end.toISOString().slice(0, 10);
+      btStartDate.value = start.toISOString().slice(0, 10);
+    })();
+
+    const sweepThresholds = document.getElementById("sweepThresholds");
+    const runSweepBtn = document.getElementById("runSweepBtn");
+    const runSweepBtnIcon = document.getElementById("runSweepBtnIcon");
+    const runSweepBtnLabel = document.getElementById("runSweepBtnLabel");
+    const sweepProgress = document.getElementById("sweepProgress");
+    const sweepProgressText = document.getElementById("sweepProgressText");
+    const sweepProgressPct = document.getElementById("sweepProgressPct");
+    const sweepProgressBar = document.getElementById("sweepProgressBar");
+    const sweepResultsSection = document.getElementById("sweepResultsSection");
+    const sweepResultsBody = document.getElementById("sweepResultsBody");
+    const sweepBestCallout = document.getElementById("sweepBestCallout");
+    const sweepBestText = document.getElementById("sweepBestText");
+
+    let sweepPollTimer = null;
+
+    function switchTab(tab) {
+      reportsView.classList.toggle("hidden", tab !== "reports");
+      backtestView.classList.toggle("hidden", tab !== "backtest");
+      tabReportsBtn.classList.toggle("tab-btn-active", tab === "reports");
+      tabBacktestBtn.classList.toggle("tab-btn-active", tab === "backtest");
+      if (tab === "backtest") {
+        fetchBacktestSummary();
+        fetchThresholdSweepStatus();
+      }
+    }
+
+    tabReportsBtn.addEventListener("click", () => switchTab("reports"));
+    tabBacktestBtn.addEventListener("click", () => switchTab("backtest"));
+
+    function formatSignedUnits(value) {
+      const rounded = Math.round(value * 100) / 100;
+      const sign = rounded > 0 ? "+" : "";
+      return `${sign}${rounded} unit`;
+    }
+
+    function colorClassForRate(rate) {
+      if (rate >= 55) return { badge: "border-emerald-500/40 bg-emerald-500/15 text-emerald-400", bar: "bg-emerald-500" };
+      if (rate >= 45) return { badge: "border-amber-500/40 bg-amber-500/15 text-amber-400", bar: "bg-amber-500" };
+      return { badge: "border-rose-500/40 bg-rose-500/15 text-rose-400", bar: "bg-rose-500" };
+    }
+
+    function renderLeagueBreakdown(leagueRows) {
+      if (!leagueRows || leagueRows.length === 0) {
+        btLeagueBreakdown.innerHTML = `<p class="text-xs text-slate-600">Bu koşuda hiçbir lig için yeterli bahis bulunamadı.</p>`;
+        return;
+      }
+      btLeagueBreakdown.innerHTML = leagueRows
+        .map((row) => {
+          const colors = colorClassForRate(row.win_rate);
+          const widthPct = Math.max(2, Math.min(100, row.win_rate));
+          return `
+            <div>
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-semibold text-slate-300">${escapeHtml(row.league_name)}</span>
+                <span class="text-slate-500">${row.won_bets}/${row.total_bets} isabet · ${formatSignedUnits(row.total_profit_units)}</span>
+              </div>
+              <div class="perf-bar-track mt-1.5 h-2 w-full overflow-hidden rounded-full">
+                <div class="perf-bar-fill h-full rounded-full ${colors.bar}" style="width:${widthPct}%"></div>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+    }
+
+    function renderBacktestSummary(summary) {
+      if (!summary.has_data) {
+        backtestEmptyState.classList.remove("hidden");
+        backtestEmptyState.classList.add("flex");
+        backtestSummaryContent.classList.add("hidden");
+        return;
+      }
+
+      backtestEmptyState.classList.add("hidden");
+      backtestEmptyState.classList.remove("flex");
+      backtestSummaryContent.classList.remove("hidden");
+
+      btRangeLabel.textContent = `${summary.start_date} → ${summary.end_date}`;
+
+      const isThresholdMarket = !summary.market || summary.market === "ms_gol_ustu";
+      if (btResultMarketLabel) {
+        btResultMarketLabel.textContent = summary.market_label || "Algoritma İsabet Oranı";
+      }
+
+      if (!summary.total_bets) {
+        const colors = colorClassForRate(0);
+        btHitRateBadge.className = `inline-flex items-center rounded-full border px-3 py-1.5 text-lg font-extrabold ${colors.badge}`;
+        btHitRateBadge.textContent = "— %";
+        btBetCountLabel.textContent = isThresholdMarket
+          ? "Bu aralıkta min. güven skorunu geçen hiçbir maç bulunamadı."
+          : "Bu aralıkta aday maç bulunamadı.";
+        btNetProfit.textContent = "0 unit";
+        btNetProfit.className = "mt-1 text-sm font-extrabold text-slate-300";
+        btRoi.textContent = "%0";
+        btRoi.className = "mt-1 text-sm font-extrabold text-slate-300";
+        btBankroll.textContent = `${summary.final_bankroll} unit`;
+        btBestBetTypeCallout.classList.add("hidden");
+        renderLeagueBreakdown([]);
+        return;
+      }
+
+      const colors = colorClassForRate(summary.win_rate);
+      btHitRateBadge.className = `inline-flex items-center rounded-full border px-3 py-1.5 text-lg font-extrabold ${colors.badge}`;
+      btHitRateBadge.textContent = `%${summary.win_rate}`;
+      const confClause = isThresholdMarket ? ` (min. güven: %${summary.min_confidence})` : "";
+      btBetCountLabel.textContent = `${summary.won_bets}/${summary.total_bets} bahis kazanıldı${confClause}`;
+
+      const isProfitable = summary.total_profit_units >= 0;
+      btNetProfit.textContent = formatSignedUnits(summary.total_profit_units);
+      btNetProfit.className = `mt-1 text-sm font-extrabold ${isProfitable ? "text-emerald-400" : "text-rose-400"}`;
+
+      btRoi.textContent = `${summary.roi_percentage > 0 ? "+" : ""}%${summary.roi_percentage}`;
+      btRoi.className = `mt-1 text-sm font-extrabold ${summary.roi_percentage >= 0 ? "text-emerald-400" : "text-rose-400"}`;
+
+      btBankroll.textContent = `${summary.final_bankroll} unit`;
+
+      if (summary.best_bet_type) {
+        btBestBetTypeCallout.classList.remove("hidden");
+        btBestBetTypeText.textContent =
+          `${summary.best_bet_type.bet_type_label} — %${summary.best_bet_type.win_rate} isabet ` +
+          `(${summary.best_bet_type.won_bets}/${summary.best_bet_type.total_bets}, ${formatSignedUnits(summary.best_bet_type.total_profit_units)})`;
+      } else {
+        btBestBetTypeCallout.classList.add("hidden");
+      }
+
+      renderLeagueBreakdown(summary.league_breakdown);
+    }
+
+    async function fetchBacktestSummary() {
+      try {
+        const res = await fetch("/api/backtest-summary");
+        const data = await res.json();
+        renderBacktestSummary(data);
+      } catch (err) {
+        showToast("Backtest özeti yüklenemedi: " + err.message, true);
+      }
+    }
+
+    // progress: backend'den gelen {"current": i, "total": N, "pct": ..., ...} --
+    // ne kadar sürdüğünü değil, NE KADAR KALDIĞINI göstermek için (bkz. kullanıcı
+    // isteği) "X/Y maç tarandı · Z maç kaldı" şeklinde okunabilir bir metne çevrilir.
+    function renderProgress(progress, { textEl, pctEl, barEl, wrapEl, label }) {
+      if (!progress) {
+        wrapEl.classList.add("hidden");
+        return;
+      }
+      wrapEl.classList.remove("hidden");
+
+      // fetch_and_cache_features() ile gelen önbellek bilgisi: aynı tarih
+      // aralığı daha önce taranmışsa already_cached > 0 olur ve total çok
+      // küçük/sıfır kalır -- bu durumda kullanıcıya NEDEN bu kadar hızlı
+      // bittiğini açıkça göstermek için ayrı bir metin kullanılır.
+      if (progress.total === 0) {
+        const already = progress.already_cached || 0;
+        textEl.textContent = already > 0
+          ? `✅ Bu aralık zaten önbellekte (${already} maç) — API isteği yapılmadı, sonuç hesaplanıyor…`
+          : "Hesaplanıyor…";
+        pctEl.textContent = "%100";
+        barEl.style.width = "100%";
+        return;
+      }
+
+      const remaining = Math.max(0, progress.total - progress.current);
+      const cacheNote = progress.already_cached ? ` (+${progress.already_cached} zaten önbellekte)` : "";
+      textEl.textContent = `${label}: ${progress.current}/${progress.total} yeni maç${cacheNote} · ${remaining} maç kaldı`;
+      pctEl.textContent = `%${progress.pct}`;
+      barEl.style.width = `${Math.min(100, Math.max(0, progress.pct))}%`;
+    }
+
+    function setRunBacktestBusy(isBusy) {
+      runBacktestBtn.disabled = isBusy;
+      runBacktestBtnIcon.textContent = isBusy ? "⏳" : "▶️";
+      runBacktestBtnLabel.textContent = isBusy ? "Backtest çalışıyor..." : "Backtest'i Çalıştır";
+      if (isBusy) {
+        backtestProgress.classList.remove("hidden");
+        backtestProgressText.textContent = "Başlatılıyor…";
+        backtestProgressPct.textContent = "%0";
+        backtestProgressBar.style.width = "0%";
+      } else {
+        backtestProgress.classList.add("hidden");
+      }
+    }
+
+    async function runBacktest() {
+      if (!btStartDate.value || !btEndDate.value) {
+        showToast("Lütfen başlangıç ve bitiş tarihini seçin.", true);
+        return;
+      }
+      if (btStartDate.value > btEndDate.value) {
+        showToast("Başlangıç tarihi, bitiş tarihinden sonra olamaz.", true);
+        return;
+      }
+
+      setRunBacktestBusy(true);
+      try {
+        const params = new URLSearchParams({
+          start_date: btStartDate.value,
+          end_date: btEndDate.value,
+          market: btMarket.value,
+          min_confidence: btMinConfidence.value || "70",
+          unit_stake: btUnitStake.value || "1",
+          skip_xg: btSkipXg.checked ? "true" : "false",
+        });
+        const res = await fetch(`/api/run-backtest?${params.toString()}`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok && res.status !== 409) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        showToast(data.message || "Backtest başlatıldı.");
+        startBacktestPolling();
+      } catch (err) {
+        showToast("Backtest tetiklenemedi: " + err.message, true);
+        setRunBacktestBusy(false);
+      }
+    }
+
+    function startBacktestPolling() {
+      if (backtestPollTimer) clearInterval(backtestPollTimer);
+      backtestPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch("/api/run-backtest/status");
+          const status = await res.json();
+          if (status.running) {
+            renderProgress(status.progress, {
+              textEl: backtestProgressText,
+              pctEl: backtestProgressPct,
+              barEl: backtestProgressBar,
+              wrapEl: backtestProgress,
+              label: "Önbellekleniyor",
+            });
+          } else {
+            clearInterval(backtestPollTimer);
+            backtestPollTimer = null;
+            setRunBacktestBusy(false);
+            showToast(status.last_message || "Backtest tamamlandı.", status.last_status === "error");
+            fetchBacktestSummary();
+          }
+        } catch (err) {
+          // Ağ hatasında polling'i sessizce durdurma; bir sonraki turda tekrar dener
+        }
+      }, 2500);
+    }
+
+    runBacktestBtn.addEventListener("click", runBacktest);
+
+    // ---------------------------------------------------------------
+    // Eşik Taraması (Threshold Sweep): aynı tarih aralığı için birden çok
+    // min_confidence eşiğini TEK API taramasıyla karşılaştırıp her eşiğin
+    // sonucunu AYRI AYRI gösterir (bkz. backtester.run_threshold_sweep).
+    // ---------------------------------------------------------------
+
+    function setRunSweepBusy(isBusy) {
+      runSweepBtn.disabled = isBusy;
+      runSweepBtnIcon.textContent = isBusy ? "⏳" : "🎯";
+      runSweepBtnLabel.textContent = isBusy ? "Tarama çalışıyor..." : "Taramayı Başlat";
+      if (isBusy) {
+        sweepProgress.classList.remove("hidden");
+        sweepProgressText.textContent = "Başlatılıyor…";
+        sweepProgressPct.textContent = "%0";
+        sweepProgressBar.style.width = "0%";
+      } else {
+        sweepProgress.classList.add("hidden");
+      }
+    }
+
+    function renderSweepResults(results) {
+      if (!results || results.length === 0) {
+        sweepResultsSection.classList.add("hidden");
+        return;
+      }
+      sweepResultsSection.classList.remove("hidden");
+
+      // "En kârlı eşik": en az 3 örneklem VE net kârlı olanlar arasından en
+      // yüksek net kâra sahip olan -- backtest özetindeki "en başarılı bahis
+      // türü" seçimiyle aynı mantık (tek bahisle %100 isabetin yanıltmasını önler).
+      const eligible = results.filter((r) => r.total_bets >= 3 && r.total_profit_units > 0);
+      const best = eligible.length
+        ? eligible.reduce((a, b) => (b.total_profit_units > a.total_profit_units ? b : a))
+        : null;
+
+      if (best) {
+        sweepBestCallout.classList.remove("hidden");
+        sweepBestText.textContent =
+          `Eşik ≥ %${best.min_confidence} — %${best.win_rate} isabet ` +
+          `(${best.won_bets}/${best.total_bets}), ${formatSignedUnits(best.total_profit_units)}, ROI %${best.roi_percentage}`;
+      } else {
+        sweepBestCallout.classList.add("hidden");
+      }
+
+      sweepResultsBody.innerHTML = results
+        .map((r) => {
+          const isBest = best && r.min_confidence === best.min_confidence;
+          const profitColor = r.total_profit_units > 0 ? "text-emerald-400" : r.total_profit_units < 0 ? "text-rose-400" : "text-slate-400";
+          const roiColor = r.roi_percentage > 0 ? "text-emerald-400" : r.roi_percentage < 0 ? "text-rose-400" : "text-slate-400";
+          return `
+            <tr class="${isBest ? "bg-amber-500/10" : ""}">
+              <td class="px-2.5 py-2 font-semibold text-slate-200">${isBest ? "🏆 " : ""}%${r.min_confidence}</td>
+              <td class="px-2.5 py-2 text-slate-400">${r.total_bets}</td>
+              <td class="px-2.5 py-2 text-slate-400">${r.won_bets}/${r.total_bets} · %${r.win_rate}</td>
+              <td class="px-2.5 py-2 font-semibold ${profitColor}">${formatSignedUnits(r.total_profit_units)}</td>
+              <td class="px-2.5 py-2 font-semibold ${roiColor}">${r.roi_percentage > 0 ? "+" : ""}%${r.roi_percentage}</td>
+              <td class="px-2.5 py-2 text-slate-400">${r.final_bankroll}</td>
+            </tr>
+          `;
+        })
+        .join("");
+    }
+
+    async function fetchThresholdSweepStatus() {
+      try {
+        const res = await fetch("/api/run-threshold-sweep/status");
+        const status = await res.json();
+        if (status.running) {
+          setRunSweepBusy(true);
+          renderProgress(status.progress, {
+            textEl: sweepProgressText,
+            pctEl: sweepProgressPct,
+            barEl: sweepProgressBar,
+            wrapEl: sweepProgress,
+            label: "Önbellekleniyor",
+          });
+          startSweepPolling();
+        } else {
+          setRunSweepBusy(false);
+          if (status.results) {
+            renderSweepResults(status.results);
+          }
+        }
+      } catch (err) {
+        // sessizce geç -- bir sonraki sekme açılışında tekrar denenir
+      }
+    }
+
+    async function runThresholdSweep() {
+      if (!btStartDate.value || !btEndDate.value) {
+        showToast("Lütfen başlangıç ve bitiş tarihini seçin.", true);
+        return;
+      }
+      if (btStartDate.value > btEndDate.value) {
+        showToast("Başlangıç tarihi, bitiş tarihinden sonra olamaz.", true);
+        return;
+      }
+      if (!sweepThresholds.value.trim()) {
+        showToast("Lütfen en az bir eşik değeri girin.", true);
+        return;
+      }
+
+      setRunSweepBusy(true);
+      try {
+        const params = new URLSearchParams({
+          start_date: btStartDate.value,
+          end_date: btEndDate.value,
+          thresholds: sweepThresholds.value.trim(),
+          unit_stake: btUnitStake.value || "1",
+          skip_xg: btSkipXg.checked ? "true" : "false",
+        });
+        const res = await fetch(`/api/run-threshold-sweep?${params.toString()}`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok && res.status !== 409) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        showToast(data.message || "Eşik taraması başlatıldı.");
+        startSweepPolling();
+      } catch (err) {
+        showToast("Eşik taraması tetiklenemedi: " + err.message, true);
+        setRunSweepBusy(false);
+      }
+    }
+
+    function startSweepPolling() {
+      if (sweepPollTimer) clearInterval(sweepPollTimer);
+      sweepPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch("/api/run-threshold-sweep/status");
+          const status = await res.json();
+          if (status.running) {
+            renderProgress(status.progress, {
+              textEl: sweepProgressText,
+              pctEl: sweepProgressPct,
+              barEl: sweepProgressBar,
+              wrapEl: sweepProgress,
+              label: "Önbellekleniyor",
+            });
+          } else {
+            clearInterval(sweepPollTimer);
+            sweepPollTimer = null;
+            setRunSweepBusy(false);
+            showToast(status.last_message || "Eşik taraması tamamlandı.", status.last_status === "error");
+            if (status.results) {
+              renderSweepResults(status.results);
+            }
+          }
+        } catch (err) {
+          // Ağ hatasında polling'i sessizce durdurma; bir sonraki turda tekrar dener
+        }
+      }, 2500);
+    }
+
+    runSweepBtn.addEventListener("click", runThresholdSweep);
+
+    // ---------------------------------------------------------------
+    // Faz 10: Tahmin Sonuçları (Raporlar sekmesine entegre)
+    // ---------------------------------------------------------------
+
+    const perfSummaryBox = document.getElementById("perfSummaryBox");
+    const perfSummaryBadge = document.getElementById("perfSummaryBadge");
+    const perfSummaryCount = document.getElementById("perfSummaryCount");
+    const perfSummaryGetiri = document.getElementById("perfSummaryGetiri");
+
+    const cumulativeBadge = document.getElementById("cumulativeBadge");
+    const cumulativeCount = document.getElementById("cumulativeCount");
+    const cumulativeGetiri = document.getElementById("cumulativeGetiri");
+
+    // net_getiri (birim bahis üzerinden kazanç/kayıp) + roi_pct'yi okunabilir,
+    // renkli bir satıra çevirir. Oran (odds) bilgisi olmayan geçmiş öneriler
+    // DEFAULT_RETURN_ODDS (1.3) ile hesaba katılmıştır (bkz. backtester.py).
+    function formatGetiri(netGetiri, roiPct) {
+      if (netGetiri === undefined || netGetiri === null || roiPct === null || roiPct === undefined) {
+        return { text: "", className: "" };
+      }
+      const sign = netGetiri > 0 ? "+" : "";
+      const text = `💰 Getiri: ${sign}${netGetiri.toFixed(2)}u (ROI %${roiPct})`;
+      let colorClass = "text-slate-500";
+      if (netGetiri > 0) colorClass = "text-emerald-500";
+      else if (netGetiri < 0) colorClass = "text-rose-500";
+      return { text, className: colorClass };
+    }
+
+    // Uygulamanın kuruluşundan beri verdiği TÜM önerilerin kümülatif isabet
+    // oranı -- başlıkta sürekli görünür, tarih/lig filtresinden bağımsızdır.
+    async function fetchCumulativePerformance() {
+      try {
+        const res = await fetch("/api/cumulative-performance");
+        if (!res.ok) {
+          cumulativeCount.textContent = "Yüklenemedi.";
+          return;
+        }
+        const data = await res.json();
+
+        if (data.fetch_info && data.fetch_info.dates_updated > 0) {
+          showToast(`${data.fetch_info.dates_updated} tarih için geçmiş sonuçlar API'den tamamlandı (${data.fetch_info.total_fetched} maç).`);
+        }
+
+        if (data.resolved > 0) {
+          const colors = colorClassForRate(data.hit_rate_pct);
+          cumulativeBadge.className = `inline-flex shrink-0 items-center rounded-full border px-3 py-1 text-sm font-extrabold ${colors.badge}`;
+          cumulativeBadge.textContent = `%${data.hit_rate_pct}`;
+          cumulativeCount.textContent = `${data.won}/${data.resolved} isabet · ${data.pending} beklemede · toplam ${data.total} öneri`;
+          const getiri = formatGetiri(data.net_getiri, data.roi_pct);
+          cumulativeGetiri.textContent = getiri.text;
+          cumulativeGetiri.className = `truncate text-[10px] font-semibold ${getiri.className}`;
+        } else {
+          cumulativeBadge.className = "inline-flex shrink-0 items-center rounded-full border border-slate-700 bg-slate-800/50 px-3 py-1 text-sm font-extrabold text-slate-500";
+          cumulativeBadge.textContent = "— %";
+          cumulativeCount.textContent = data.total > 0 ? `${data.pending} öneri henüz sonuçlanmadı.` : "Henüz sonuçlanmış veri yok.";
+          cumulativeGetiri.textContent = "";
+        }
+      } catch (err) {
+        cumulativeCount.textContent = "Yüklenemedi.";
+      }
+    }
+
+    function indexEntriesByMatchId(entries) {
+      const map = {};
+      (entries || []).forEach((e) => {
+        map[e.match_id] = e;
+      });
+      return map;
+    }
+
+    function updatePerfSummaryBox(overall) {
+      if (!overall || overall.total === 0) {
+        perfSummaryBox.classList.add("hidden");
+        return;
+      }
+      perfSummaryBox.classList.remove("hidden");
+      if (overall.resolved > 0) {
+        const colors = colorClassForRate(overall.hit_rate_pct);
+        perfSummaryBadge.className = `inline-flex shrink-0 items-center rounded-full border px-3 py-1.5 text-lg font-extrabold ${colors.badge}`;
+        perfSummaryBadge.textContent = `%${overall.hit_rate_pct}`;
+        perfSummaryCount.textContent = `${overall.won}/${overall.resolved} isabet · ${overall.pending} beklemede (toplam ${overall.total} öneri)`;
+        const getiri = formatGetiri(overall.net_getiri, overall.roi_pct);
+        perfSummaryGetiri.textContent = getiri.text;
+        perfSummaryGetiri.className = `mt-0.5 truncate text-[11px] font-semibold ${getiri.className}`;
+      } else {
+        perfSummaryBadge.className = "inline-flex shrink-0 items-center rounded-full border border-slate-700 bg-slate-800/50 px-3 py-1.5 text-lg font-extrabold text-slate-500";
+        perfSummaryBadge.textContent = "— %";
+        perfSummaryCount.textContent = `${overall.pending} öneri henüz sonuçlanmadı.`;
+        perfSummaryGetiri.textContent = "";
+      }
+    }
+
+    // Seçilen tarih + lig filtresi için TÜM piyasaların gerçek sonuçla
+    // karşılaştırmasını çeker (tek istek, kota dostu -- bkz. main.py).
+    // Sonuçlar resultsMap'e işlenir ve 4 ana liste, rozetler görünsün diye
+    // yeniden render edilir (renderCard / renderFirstHalfCard / createGoalMarketSection
+    // içindeki renderResultBadge çağrıları bu map'i okur).
+    async function fetchPredictionPerformance() {
+      try {
+        const url = `/api/prediction-performance?date=${encodeURIComponent(state.date)}&league_id=${encodeURIComponent(state.leagueId)}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+
+        if (data.fetch_info && !data.fetch_info.skipped && data.fetch_info.fetched > 0) {
+          showToast(`${data.fetch_info.fetched} maç sonucu API'den çekildi.`);
+        }
+
+        resultsMap = {
+          ms_gol_ustu: indexEntriesByMatchId(data.markets.ms_gol_ustu.entries),
+          ilk_yari_1: indexEntriesByMatchId(data.markets.ilk_yari_1.entries),
+          over_2_5: indexEntriesByMatchId(data.markets.over_2_5.entries),
+          btts: indexEntriesByMatchId(data.markets.btts.entries),
+        };
+        updatePerfSummaryBox(data.overall);
+        fetchCumulativePerformance();
+
+        // resultsMap artık dolu -- rozetlerin görünmesi için kartları yeniden çiz.
+        fetchReports();
+        fetchFirstHalfCandidates();
+        over25Section.fetchCandidates();
+        bttsSection.fetchCandidates();
+      } catch (err) {
+        // Sonuç verisi opsiyonel bir zenginleştirme -- hata olursa ana
+        // raporları bozmadan sessizce geç.
+        perfSummaryBox.classList.add("hidden");
+        console.warn("Tahmin sonuçları yüklenemedi:", err.message);
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // PWA: Service Worker Kaydı
+    // ---------------------------------------------------------------
+    if (false) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("static/sw.js").catch((err) => {
+          console.warn("Service worker kaydı başarısız:", err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
